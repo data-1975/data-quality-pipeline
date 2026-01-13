@@ -1,0 +1,22 @@
+### ✅ Abordagem aplicada
+O fluxo principal foi:
+1. Diagnóstico inicial da qualidade do dataset  
+2. Padronização de categorias e tipos  
+3. Regras de validação e correções  
+4. Resultado final pronto para análises futuras
+
+### 🔧 Trecho “chave” da solução (exemplo)
+Abaixo está um exemplo do tipo de transformação aplicada para padronização e consistência:
+
+
+# Exemplo de padronização de dados categóricos
+df["genero"] = (
+    df["genero"]
+    .astype(str)
+    .str.strip()
+    .str.lower()
+    .replace({"m": "masculino", "f": "feminino"})
+)
+
+# Exemplo de checagem simples de consistência
+df = df[df["idade"].between(18, 70)]

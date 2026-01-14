@@ -1,0 +1,283 @@
+## 1) Estrutura de pastas (pronta pra produção)
+
+```txt
+.
+├─ README.md
+├─ requirements.txt
+├─ main.py
+├─ src/
+│  ├─ __init__.py
+│  ├─ io.py
+│  ├─ preprocess.py
+│  └─ validate.py
+├─ notebooks/
+│  └─ DSA-Projeto2.ipynb
+├─ data/
+│  └─ dataset.csv
+└─ outputs/
+   ├─ dataset_clean.csv
+   └─ report.json
+```
+
+---
+
+## 2) `requirements.txt`
+
+```txt
+pandas>=2.0.0
+numpy>=1.24.0
+```
+---
+
+## 3) Código (CLI + pipeline)
+
+### `main.py` (CLI padrão)
+
+```python
+import argparse
+from pathlib import Path
+
+from src.io import load_csv, save_csv, save_json
+from src.preprocess import run_preprocess
+from src.validate import run_validations
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Pipeline batch de pré-processamento.")
+    p.add_argument("--input", "-i", required=True, help="CSV de entrada.")
+    p.add_argument("--output", "-o", required=True, help="CSV de saída.")
+    p.add_argument("--report", "-r", default=None, help="Relatório JSON (opcional).")
+    p.add_argument(
+        "--fail-on-validation",
+        action="store_true",
+        help="Falha a execução se validações críticas não passarem.",
+    )
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    input_path = Path(args.input)
+    output_path = Path(args.output)
+    report_path = Path(args.report) if args.report else None
+
+    df = load_csv(input_path)
+
+    df_clean, metrics = run_preprocess(df)
+    validation = run_validations(df_clean)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    save_csv(df_clean, output_path)
+
+    if report_path:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        save_json(
+            {
+                "metrics": metrics,
+                "validation": validation,
+            },
+            report_path,
+        )
+
+    if args.fail_on_validation and not validation["passed"]:
+        raise SystemExit(f"Falhou validação: {validation['errors']}")
+
+    print("OK - pipeline executado.")
+    print(f"Output: {output_path}")
+    if report_path:
+        print(f"Report: {report_path}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+### `src/io.py`
+
+```python
+from pathlib import Path
+import json
+import pandas as pd
+
+
+def load_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {path}")
+    return pd.read_csv(path)
+
+
+def save_csv(df: pd.DataFrame, path: Path) -> None:
+    df.to_csv(path, index=False)
+
+
+def save_json(obj: dict, path: Path) -> None:
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+```
+
+---
+
+### `src/preprocess.py` (a lógica do notebook, sem mudar)
+
+```python
+from __future__ import annotations
+import pandas as pd
+
+
+def run_preprocess(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    out = df.copy()
+
+    metrics: dict = {
+        "input_rows": int(len(out)),
+        "negative_salary_count": None,
+        "salary_na_before_fill": None,
+        "score_na_before_fill": None,
+    }
+
+    # 1) Salário negativo -> NaN (no notebook foi None; aqui usamos pd.NA)
+    if "Salario" in out.columns:
+        neg_count = int((out["Salario"] < 0).sum(skipna=True))
+        metrics["negative_salary_count"] = neg_count
+
+        out["Salario"] = out["Salario"].apply(lambda x: x if pd.notna(x) and x >= 0 else pd.NA)
+
+        # 2) Preencher NaN de Salario com média
+        metrics["salary_na_before_fill"] = int(out["Salario"].isna().sum())
+        media_salario = out["Salario"].mean(skipna=True)
+        out["Salario"].fillna(media_salario, inplace=True)
+
+    # 3) Preencher NaN do Score_Exame_Psicotecnico com média
+    if "Score_Exame_Psicotecnico" in out.columns:
+        metrics["score_na_before_fill"] = int(out["Score_Exame_Psicotecnico"].isna().sum())
+        media_score = out["Score_Exame_Psicotecnico"].mean(skipna=True)
+        out["Score_Exame_Psicotecnico"].fillna(media_score, inplace=True)
+
+    # 4) Faixa etária (bins/labels exatamente como notebook)
+    if "Idade" in out.columns:
+        faixas_etarias = [0, 25, 35, 45, 55, float("inf")]
+        rotulos_faixas = ["Menos de 25", "25-34", "35-44", "45-54", "55 ou mais"]
+        out["Faixa_Etaria"] = pd.cut(out["Idade"], bins=faixas_etarias, labels=rotulos_faixas)
+
+        # 5) Drop Idade (como no notebook)
+        out.drop("Idade", axis=1, inplace=True)
+
+    # 6) Arredondar e converter para int (como no notebook)
+    # Obs: se tiver NA residual, astype(int) quebra. Aqui garantimos conversão segura.
+    for col in ["Salario", "Score_Exame_Psicotecnico"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").round()
+            # se existirem NaNs inesperados, preenche com média antes de virar int
+            if out[col].isna().any():
+                out[col].fillna(out[col].mean(skipna=True), inplace=True)
+            out[col] = out[col].astype(int)
+
+    metrics["output_rows"] = int(len(out))
+    return out, metrics
+```
+
+---
+
+### `src/validate.py` (validações coerentes com o que o notebook “garante”)
+
+```python
+from __future__ import annotations
+import pandas as pd
+
+
+def run_validations(df: pd.DataFrame) -> dict:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # Após o preprocess, não deve haver salário negativo
+    if "Salario" in df.columns:
+        if (df["Salario"] < 0).any():
+            errors.append("Há valores negativos em 'Salario' após preprocess.")
+        if df["Salario"].isna().any():
+            errors.append("Há NaN em 'Salario' após preenchimento pela média.")
+        # Checagem de tipo (o notebook converte pra int)
+        if not pd.api.types.is_integer_dtype(df["Salario"]):
+            warnings.append("'Salario' não está como inteiro.")
+
+    # Score também deve estar sem NaN e como int
+    if "Score_Exame_Psicotecnico" in df.columns:
+        if df["Score_Exame_Psicotecnico"].isna().any():
+            errors.append("Há NaN em 'Score_Exame_Psicotecnico' após preenchimento pela média.")
+        if not pd.api.types.is_integer_dtype(df["Score_Exame_Psicotecnico"]):
+            warnings.append("'Score_Exame_Psicotecnico' não está como inteiro.")
+
+    # Faixa_Etaria deve existir se Idade existia na entrada (aqui validamos apenas consistência)
+    if "Faixa_Etaria" in df.columns:
+        allowed = {"Menos de 25", "25-34", "35-44", "45-54", "55 ou mais"}
+        invalid = set(df["Faixa_Etaria"].dropna().astype(str).unique()) - allowed
+        if invalid:
+            warnings.append(f"Categorias inesperadas em 'Faixa_Etaria': {sorted(invalid)}")
+
+    passed = len(errors) == 0
+    return {"passed": passed, "errors": errors, "warnings": warnings}
+```
+
+---
+
+## 4) GitHub Actions (rodar pipeline + publicar artefatos)
+
+Crie `.github/workflows/pipeline.yml`:
+
+```yaml
+name: data-preprocess-pipeline
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pipeline
+        run: |
+          python main.py \
+            --input data/dataset.csv \
+            --output outputs/dataset_clean.csv \
+            --report outputs/report.json \
+            --fail-on-validation
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-outputs
+          path: |
+            outputs/dataset_clean.csv
+            outputs/report.json
+```
+
+---
+
+## 5) Como executar localmente
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # (Windows: .venv\Scripts\activate)
+pip install -r requirements.txt
+
+python main.py --input data/dataset.csv --output outputs/dataset_clean.csv --report outputs/report.json
+```
+
+---
